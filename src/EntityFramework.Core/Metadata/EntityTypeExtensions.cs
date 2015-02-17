@@ -12,9 +12,10 @@ namespace Microsoft.Data.Entity.Metadata
 {
     public static class EntityTypeExtensions
     {
-        public static IEnumerable<IPropertyBase> GetPropertiesAndNavigations([NotNull] this IEntityType entityType)
+        public static IEnumerable<IPropertyBase> GetPropertiesAndNavigations(
+            [NotNull] this IEntityType entityType)
         {
-            Check.NotNull(entityType, "entityType");
+            Check.NotNull(entityType, nameof(entityType));
 
             return entityType.Properties.Concat<IPropertyBase>(entityType.Navigations);
         }
@@ -22,17 +23,23 @@ namespace Microsoft.Data.Entity.Metadata
         [NotNull]
         public static IEnumerable<IForeignKey> GetReferencingForeignKeys([NotNull] this IEntityType entityType)
         {
+            Check.NotNull(entityType, nameof(entityType));
+
             return entityType.Model.GetReferencingForeignKeys(entityType);
         }
 
         public static bool HasPropertyChangingNotifications([NotNull] this IEntityType entityType)
         {
+            Check.NotNull(entityType, nameof(entityType));
+
             return entityType.Type == null
                    || typeof(INotifyPropertyChanging).GetTypeInfo().IsAssignableFrom(entityType.Type.GetTypeInfo());
         }
 
         public static bool HasPropertyChangedNotifications([NotNull] this IEntityType entityType)
         {
+            Check.NotNull(entityType, nameof(entityType));
+
             return entityType.Type == null
                    || typeof(INotifyPropertyChanged).GetTypeInfo().IsAssignableFrom(entityType.Type.GetTypeInfo());
         }

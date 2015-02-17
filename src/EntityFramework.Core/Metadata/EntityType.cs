@@ -38,9 +38,12 @@ namespace Microsoft.Data.Entity.Metadata
                 new SortedDictionary<IReadOnlyList<Property>, Key>(PropertyListComparer.Instance));
 
         private readonly object _typeOrName;
+        private readonly LazyRef<bool> _hasDerivedTypes;
 
-        private EntityType _baseType;
         private Key _primaryKey;
+        private EntityType _baseType;
+
+        public event EventHandler<Property> PropertyMetadataChanged;
 
         private int _shadowPropertyCount;
         private int _originalValueCount;
@@ -61,14 +64,11 @@ namespace Microsoft.Data.Entity.Metadata
         /// <param name="type">The .NET entity type that this metadata object represents.</param>
         /// <param name="model">The model associated with this entity type.</param>
         public EntityType([NotNull] Type type, [NotNull] Model model)
+            : this(
+                (object)Check.NotNull(type, nameof(type)),
+                Check.NotNull(model, nameof(model)))
         {
-            Check.NotNull(type, "type");
-            Check.NotNull(model, "model");
-            Check.ValidEntityType(type, "type");
-
-            _typeOrName = type;
-
-            Model = model;
+            Check.ValidEntityType(type, nameof(type));
 
             _useEagerSnapshots = !this.HasPropertyChangingNotifications();
         }
@@ -80,13 +80,19 @@ namespace Microsoft.Data.Entity.Metadata
         /// <param name="name">The name of the shadow-state entity type.</param>
         /// <param name="model">The model associated with this entity type.</param>
         public EntityType([NotNull] string name, [NotNull] Model model)
+            : this(
+                (object)Check.NotEmpty(name, nameof(name)),
+                Check.NotNull(model, nameof(model)))
         {
-            Check.NotEmpty(name, "name");
-            Check.NotNull(model, "model");
+        }
 
-            _typeOrName = name;
+        private EntityType(object typeOrName, Model model)
+        {
+            _typeOrName = typeOrName;
 
             Model = model;
+
+            _hasDerivedTypes = new LazyRef<bool>(() => GetDerivedTypes().Any());
         }
 
         public virtual Type Type => _typeOrName as Type;
@@ -117,18 +123,13 @@ namespace Microsoft.Data.Entity.Metadata
                         throw new InvalidOperationException(Strings.DerivedEntityCannotHaveKeys(this));
                     }
 
-                    foreach (var property in value.Properties.Where(property => _properties.ContainsKey(property.Name)))
-                    {
-                        // TODO: Remove or throw?
+                    ValidateNoNameCollision(value);
 
-                        Property p;
-                        if (_properties.TryGetValue(property.Name, out p))
-                        {
-                            RemoveProperty(p);
-                        }
-
-                        //throw new InvalidOperationException(Strings.DuplicateProperty(property.Name, Name));
-                    }
+                    value.PropertyMetadataChanged += OnPropertyMetadataChanged;
+                }
+                else
+                {
+                    _baseType.PropertyMetadataChanged -= OnPropertyMetadataChanged;
                 }
 
                 _baseType = value;
@@ -136,6 +137,15 @@ namespace Microsoft.Data.Entity.Metadata
                 UpdateIndexes();
                 UpdateShadowIndexes();
                 UpdateOriginalValueIndexes();
+            }
+        }
+
+        private void ValidateNoNameCollision(EntityType entityType)
+        {
+            foreach (var property in entityType.Properties
+                .Where(property => _properties.ContainsKey(property.Name)))
+            {
+                throw new InvalidOperationException(Strings.DuplicateProperty(property.Name, Name));
             }
         }
 
@@ -154,6 +164,36 @@ namespace Microsoft.Data.Entity.Metadata
 
             return false;
         }
+
+        public virtual bool HasDerivedTypes => _hasDerivedTypes.Value;
+
+        public virtual IEnumerable<EntityType> GetDerivedTypes()
+        {
+            return GetDerivedTypes(Model, this);
+        }
+
+        public virtual IEnumerable<EntityType> GetConcreteTypesInHierarchy()
+        {
+            return new[] { this }
+                .Concat(GetDerivedTypes())
+                .Where(et => !et.IsAbstract);
+        }
+
+        private static IEnumerable<EntityType> GetDerivedTypes(Model model, EntityType entityType)
+        {
+            foreach (var et1 in model.EntityTypes
+                .Where(et1 => et1.BaseType == entityType))
+            {
+                yield return et1;
+
+                foreach (var et2 in GetDerivedTypes(model, et1))
+                {
+                    yield return et2;
+                }
+            }
+        }
+
+        public virtual bool IsAbstract => Type?.GetTypeInfo().IsAbstract ?? false;
 
         public virtual EntityType RootType => BaseType?.RootType ?? this;
 
@@ -177,6 +217,8 @@ namespace Microsoft.Data.Entity.Metadata
         public virtual int ShadowPropertyCount => _shadowPropertyCount;
 
         public virtual int OriginalValueCount => _originalValueCount;
+
+        public virtual int PropertyCount => (BaseType?.PropertyCount ?? 0) + _properties.Count;
 
         public virtual bool HasClrType => Type != null;
 
@@ -208,7 +250,7 @@ namespace Microsoft.Data.Entity.Metadata
         [ContractAnnotation("null => null; notnull => notnull")]
         public virtual Key SetPrimaryKey([CanBeNull] IReadOnlyList<Property> properties)
         {
-            ThrowifDerivedEntity();
+            ThrowIfDerivedEntity();
 
             Key key = null;
             if (properties != null
@@ -285,7 +327,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Key TryGetPrimaryKey([CanBeNull] IReadOnlyList<Property> properties)
         {
-            Check.NotNull(properties, "properties");
+            Check.NotNull(properties, nameof(properties));
 
             if (BaseType != null)
             {
@@ -308,8 +350,8 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Key AddKey([NotNull] IReadOnlyList<Property> properties)
         {
-            Check.NotEmpty(properties, "properties");
-            ThrowifDerivedEntity();
+            Check.NotEmpty(properties, nameof(properties));
+            ThrowIfDerivedEntity();
 
             var key = TryGetKey(properties);
             if (key != null)
@@ -348,7 +390,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Key TryGetKey([NotNull] IReadOnlyList<Property> properties)
         {
-            Check.NotEmpty(properties, "properties");
+            Check.NotEmpty(properties, nameof(properties));
 
             var key = TryGetPrimaryKey(properties);
             if (key != null)
@@ -383,8 +425,8 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Key RemoveKey([NotNull] Key key)
         {
-            Check.NotNull(key, "key");
-            ThrowifDerivedEntity();
+            Check.NotNull(key, nameof(key));
+            ThrowIfDerivedEntity();
 
             var primaryKey = TryGetPrimaryKey(key.Properties);
             if (primaryKey != null)
@@ -436,7 +478,7 @@ namespace Microsoft.Data.Entity.Metadata
             }
         }
 
-        private void ThrowifDerivedEntity([CallerMemberName] string caller = null)
+        private void ThrowIfDerivedEntity([CallerMemberName] string caller = null)
         {
             if (BaseType != null)
             {
@@ -449,23 +491,28 @@ namespace Microsoft.Data.Entity.Metadata
         #region Foreign Keys
 
         public virtual ForeignKey AddForeignKey(
-            [NotNull] Property property, [NotNull] Key referencedKey)
+            [NotNull] Property property,
+            [NotNull] Key referencedKey,
+            [CanBeNull] EntityType referencedEntityType = null)
         {
-            return AddForeignKey(new[] { property }, referencedKey);
+            return AddForeignKey(new[] { property }, referencedKey, referencedEntityType);
         }
 
         public virtual ForeignKey AddForeignKey(
-            [NotNull] IReadOnlyList<Property> properties, [NotNull] Key referencedKey)
+            [NotNull] IReadOnlyList<Property> properties,
+            [NotNull] Key referencedKey,
+            [CanBeNull] EntityType referencedEntityType = null)
         {
-            Check.NotEmpty(properties, "properties");
-            Check.NotNull(referencedKey, "referencedKey");
+            Check.NotEmpty(properties, nameof(properties));
+            Check.NotNull(referencedKey, nameof(referencedKey));
 
             if (_foreignKeys.Value.ContainsKey(properties))
             {
                 throw new InvalidOperationException(Strings.DuplicateForeignKey(Property.Format(properties), Name));
             }
 
-            var foreignKey = new ForeignKey(properties, referencedKey);
+            var foreignKey = new ForeignKey(properties, referencedKey, referencedEntityType);
+
             if (foreignKey.EntityType != this)
             {
                 throw new ArgumentException(Strings.ForeignKeyPropertiesWrongEntity(Property.Format(properties), Name));
@@ -501,7 +548,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual ForeignKey TryGetForeignKey([NotNull] IReadOnlyList<Property> properties)
         {
-            Check.NotEmpty(properties, "properties");
+            Check.NotEmpty(properties, nameof(properties));
 
             ForeignKey foreignKey;
             if (_foreignKeys.HasValue
@@ -522,7 +569,7 @@ namespace Microsoft.Data.Entity.Metadata
             [CanBeNull] IReadOnlyList<Property> referencedProperties,
             bool? isUnique)
         {
-            Check.NotNull(principalType, "principalType");
+            Check.NotNull(principalType, nameof(principalType));
 
             return ForeignKeys.FirstOrDefault(fk =>
                 fk.IsCompatible(
@@ -553,7 +600,7 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual ForeignKey RemoveForeignKey([NotNull] ForeignKey foreignKey)
         {
-            Check.NotNull(foreignKey, "foreignKey");
+            Check.NotNull(foreignKey, nameof(foreignKey));
 
             ForeignKey removedFk;
             if (_foreignKeys.HasValue
@@ -588,8 +635,8 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Navigation AddNavigation([NotNull] string name, [NotNull] ForeignKey foreignKey, bool pointsToPrincipal)
         {
-            Check.NotEmpty(name, "name");
-            Check.NotNull(foreignKey, "foreignKey");
+            Check.NotEmpty(name, nameof(name));
+            Check.NotNull(foreignKey, nameof(foreignKey));
 
             if (_navigations.HasValue
                 && _navigations.Value.ContainsKey(name))
@@ -661,7 +708,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Navigation TryGetNavigation([NotNull] string name)
         {
-            Check.NotEmpty(name, "name");
+            Check.NotEmpty(name, nameof(name));
 
             Navigation navigation;
             if (_navigations.HasValue
@@ -684,7 +731,7 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Navigation RemoveNavigation([NotNull] Navigation navigation)
         {
-            Check.NotNull(navigation, "navigation");
+            Check.NotNull(navigation, nameof(navigation));
 
             Navigation removedNavigation;
             if (_navigations.HasValue & _navigations.Value.TryGetValue(navigation.Name, out removedNavigation))
@@ -711,7 +758,7 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Index AddIndex([NotNull] IReadOnlyList<Property> properties)
         {
-            Check.NotEmpty(properties, "properties");
+            Check.NotEmpty(properties, nameof(properties));
 
             if (_indexes.Value.ContainsKey(properties))
             {
@@ -749,7 +796,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Index TryGetIndex([NotNull] IReadOnlyList<Property> properties)
         {
-            Check.NotEmpty(properties, "properties");
+            Check.NotEmpty(properties, nameof(properties));
 
             Index index;
             if (_indexes.HasValue
@@ -777,7 +824,7 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Index RemoveIndex([NotNull] Index index)
         {
-            Check.NotNull(index, "index");
+            Check.NotNull(index, nameof(index));
 
             Index removedIndex;
             if (_indexes.HasValue
@@ -801,16 +848,16 @@ namespace Microsoft.Data.Entity.Metadata
         [NotNull]
         public virtual Property AddProperty([NotNull] PropertyInfo propertyInfo)
         {
-            Check.NotNull(propertyInfo, "propertyInfo");
+            Check.NotNull(propertyInfo, nameof(propertyInfo));
 
-            return AddProperty(propertyInfo.Name, propertyInfo.PropertyType, shadowProperty: false);
+            return AddProperty(propertyInfo.Name, propertyInfo.PropertyType);
         }
 
         [NotNull]
         public virtual Property AddProperty([NotNull] string name, [NotNull] Type propertyType, bool shadowProperty = false)
         {
-            Check.NotNull(name, "name");
-            Check.NotNull(propertyType, "propertyType");
+            Check.NotNull(name, nameof(name));
+            Check.NotNull(propertyType, nameof(propertyType));
 
             if (_properties.ContainsKey(name))
             {
@@ -823,16 +870,14 @@ namespace Microsoft.Data.Entity.Metadata
 
             _properties.Add(name, property);
 
-            UpdateIndexes();
-
-            PropertyMetadataChanged(property);
+            OnPropertyMetadataChanged(this, property);
 
             return property;
         }
 
         public virtual Property GetOrAddProperty([NotNull] PropertyInfo propertyInfo)
         {
-            Check.NotNull(propertyInfo, "propertyInfo");
+            Check.NotNull(propertyInfo, nameof(propertyInfo));
 
             return GetOrAddProperty(propertyInfo.Name, propertyInfo.PropertyType);
         }
@@ -848,7 +893,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Property TryGetProperty([NotNull] PropertyInfo propertyInfo)
         {
-            Check.NotNull(propertyInfo, "propertyInfo");
+            Check.NotNull(propertyInfo, nameof(propertyInfo));
 
             return TryGetProperty(propertyInfo.Name);
         }
@@ -856,7 +901,7 @@ namespace Microsoft.Data.Entity.Metadata
         [CanBeNull]
         public virtual Property TryGetProperty([NotNull] string propertyName)
         {
-            Check.NotEmpty(propertyName, "propertyName");
+            Check.NotEmpty(propertyName, nameof(propertyName));
 
             Property property;
 
@@ -867,14 +912,14 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Property GetProperty([NotNull] PropertyInfo propertyInfo)
         {
-            Check.NotNull(propertyInfo, "propertyInfo");
+            Check.NotNull(propertyInfo, nameof(propertyInfo));
 
             return GetProperty(propertyInfo.Name);
         }
 
         public virtual Property GetProperty([NotNull] string propertyName)
         {
-            Check.NotEmpty(propertyName, "propertyName");
+            Check.NotEmpty(propertyName, nameof(propertyName));
 
             var property = TryGetProperty(propertyName);
 
@@ -888,7 +933,7 @@ namespace Microsoft.Data.Entity.Metadata
 
         public virtual Property RemoveProperty([NotNull] Property property)
         {
-            Check.NotNull(property, "property");
+            Check.NotNull(property, nameof(property));
 
             Property removedProperty;
             if (_properties.TryGetValue(property.Name, out removedProperty))
@@ -902,9 +947,7 @@ namespace Microsoft.Data.Entity.Metadata
 
                 _properties.Remove(property.Name);
 
-                UpdateIndexes();
-
-                PropertyMetadataChanged(property);
+                OnPropertyMetadataChanged(this, property);
 
                 return removedProperty;
             }
@@ -916,8 +959,6 @@ namespace Microsoft.Data.Entity.Metadata
             => BaseType != null
                 ? BaseType.Properties.Concat(_properties.Values)
                 : _properties.Values;
-
-        public virtual int PropertyCount => (BaseType?.PropertyCount ?? 0) + _properties.Count;
 
         private void ValidateAgainstClrProperty(IProperty property)
         {
@@ -944,11 +985,20 @@ namespace Microsoft.Data.Entity.Metadata
             }
         }
 
-        internal void PropertyMetadataChanged(Property property)
+        internal void OnPropertyMetadataChanged(object sender, Property property)
         {
             ValidateAgainstClrProperty(property);
+
+            if (BaseType != null)
+            {
+                ValidateNoNameCollision(BaseType);
+            }
+
+            UpdateIndexes();
             UpdateShadowIndexes();
             UpdateOriginalValueIndexes(property);
+
+            PropertyMetadataChanged?.Invoke(this, property);
         }
 
         private void UpdateIndexes()
@@ -1039,6 +1089,16 @@ namespace Microsoft.Data.Entity.Metadata
         INavigation IEntityType.GetNavigation(string name)
         {
             return GetNavigation(name);
+        }
+
+        IEnumerable<IEntityType> IEntityType.GetDerivedTypes()
+        {
+            return GetDerivedTypes();
+        }
+
+        IEnumerable<IEntityType> IEntityType.GetConcreteTypesInHierarchy()
+        {
+            return GetConcreteTypesInHierarchy();
         }
 
         IEnumerable<IProperty> IEntityType.Properties => Properties;
